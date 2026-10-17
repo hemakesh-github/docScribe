@@ -47,6 +47,7 @@ interface Consultation {
   action_points: ActionPointsData;
   email_sent_to: string;
   created_at: string;
+  stt_status?: string;
 }
 
 export const App: React.FC = () => {
@@ -216,7 +217,11 @@ export const App: React.FC = () => {
       } else if (selectedFile) {
         formData.append('file', selectedFile);
       } else if (audioBlob) {
-        formData.append('file', audioBlob, 'consultation.wav');
+        let ext = 'webm';
+        if (audioBlob.type.includes('mp4') || audioBlob.type.includes('m4a')) ext = 'mp4';
+        else if (audioBlob.type.includes('wav')) ext = 'wav';
+        else if (audioBlob.type.includes('ogg')) ext = 'ogg';
+        formData.append('file', audioBlob, `consultation.${ext}`);
       }
 
       const res = await fetch('/api/consultation/process', {
@@ -742,6 +747,13 @@ export const App: React.FC = () => {
                   <p className="text-xs text-slate-500">
                     This unedited word-for-word record is archived in SQLite to give patients complete satisfaction, memory support, and legal reference.
                   </p>
+
+                  {consultationResult.stt_status && (
+                    <div className="bg-slate-100 border border-slate-200 text-slate-700 text-xs px-3 py-2 rounded-lg font-medium">
+                      <span className="font-bold text-slate-800">Engine Note: </span>
+                      {consultationResult.stt_status}
+                    </div>
+                  )}
 
                   <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 font-mono text-xs text-slate-800 whitespace-pre-wrap max-h-60 overflow-y-auto leading-relaxed">
                     {consultationResult.raw_transcript}

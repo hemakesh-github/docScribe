@@ -114,23 +114,42 @@ async def process_consultation(
             f.write(audio_content)
 
         # Transcribe with Sarvam STT using server configuration
+        stt_status_msg = ""
         if key:
             try:
+                # Determine correct content type
+                c_type = file.content_type or "audio/wav"
+                if file.filename.endswith(".webm"):
+                    c_type = "audio/webm"
+                elif file.filename.endswith(".mp4") or file.filename.endswith(".m4a"):
+                    c_type = "audio/mp4"
+                elif file.filename.endswith(".ogg"):
+                    c_type = "audio/ogg"
+
                 async with httpx.AsyncClient(timeout=float(settings.stt_timeout_seconds)) as client:
+                    data_payload = {
+                        "model": settings.stt_model,
+                        "language_code": settings.stt_default_language,
+                    }
                     resp = await client.post(
                         f"{settings.sarvam_api_url}/speech-to-text",
                         headers={"api-subscription-key": key},
-                        data={
-                            "model": settings.stt_model,
-                            "language_code": settings.stt_default_language,
-                            "with_timestamps": "false"
-                        },
-                        files={"file": (file.filename, audio_content, file.content_type or "audio/wav")}
+                        data=data_payload,
+                        files={"file": (file.filename, audio_content, c_type)}
                     )
+                    
                     if resp.status_code == 200:
-                        raw_transcript = resp.json().get("transcript", "")
+                        res_json = resp.json()
+                        raw_transcript = res_json.get("transcript", "").strip()
+                        stt_status_msg = f"Live transcribed with Sarvam AI ({res_json.get('language_code', 'auto')})"
+                    else:
+                        stt_status_msg = f"Sarvam STT returned HTTP {resp.status_code}: {resp.text}"
+                        print(f"Sarvam STT error: {resp.status_code} - {resp.text}")
             except Exception as e:
+                stt_status_msg = f"Sarvam STT connection error: {str(e)}"
                 print(f"Sarvam STT failed: {e}")
+        else:
+            stt_status_msg = "Notice: SARVAM_API_KEY is not set in backend/.env. Using demo transcription."
 
         # If transcript is empty or demo, fall back to sample transcript
         if not raw_transcript:
@@ -138,6 +157,7 @@ async def process_consultation(
     else:
         saved_filename = "sample_consultation.wav"
         raw_transcript = SAMPLE_TRANSCRIPT
+        stt_status_msg = "Loaded 1-click sample consultation."
 
     # 2. Extract Action Points & Structure using Sarvam Chat Model (or intelligent extractor)
     action_points = await extract_action_points_with_ai(raw_transcript, patient_name, doctor_name, key)
@@ -172,7 +192,8 @@ async def process_consultation(
         "audio_filename": saved_filename,
         "raw_transcript": raw_transcript,
         "action_points": action_points,
-        "email_result": email_result
+        "email_result": email_result,
+        "stt_status": stt_status_msg
     }
 
 @app.post("/api/consultation/send-email")
