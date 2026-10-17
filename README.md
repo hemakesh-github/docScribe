@@ -100,3 +100,4 @@ docScribe/
 
 3. **Past Records**:
    - Click **"SQLite Records"** to review previous consultation records anytime.
+# docScribe
