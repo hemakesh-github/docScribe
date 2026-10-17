@@ -257,8 +257,34 @@ Return valid JSON only matching this schema:
                 )
                 if resp.status_code == 200:
                     data = resp.json()
-                    content = data["choices"][0]["message"]["content"]
-                    parsed = json.loads(content)
+                    message = data.get("choices", [{}])[0].get("message", {})
+                    content = message.get("content")
+                    if not content and message.get("reasoning_content"):
+                        content = message.get("reasoning_content")
+
+                    parsed = None
+                    if isinstance(content, dict):
+                        parsed = content
+                    elif isinstance(content, str) and content.strip():
+                        raw_str = content.strip()
+                        if raw_str.startswith("```"):
+                            lines = raw_str.split("\n")
+                            if lines[0].startswith("```"):
+                                lines = lines[1:]
+                            if lines and lines[-1].strip().startswith("```"):
+                                lines = lines[:-1]
+                            raw_str = "\n".join(lines).strip()
+
+                        start_idx = raw_str.find("{")
+                        end_idx = raw_str.rfind("}")
+                        if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+                            raw_str = raw_str[start_idx:end_idx + 1]
+
+                        try:
+                            parsed = json.loads(raw_str)
+                        except Exception as parse_err:
+                            print(f"Sarvam Chat JSON parse warning: {parse_err}")
+
                     if isinstance(parsed, dict):
                         action_points = parsed.get("action_points")
                         if not isinstance(action_points, list):
@@ -274,6 +300,15 @@ Return valid JSON only matching this schema:
                             "diet_advice": parsed.get("diet_advice") or "Follow standard health precautions.",
                             "follow_up": parsed.get("follow_up") or "Consult doctor as advised.",
                             "summary": parsed.get("summary") or parsed.get("note") or f"Consultation recorded with {doctor_name}."
+                        }
+                    elif content and isinstance(content, str):
+                        # If model returned text that wasn't JSON, use it as the summary
+                        return {
+                            "action_points": [],
+                            "medications": [],
+                            "diet_advice": "Follow standard health precautions.",
+                            "follow_up": "Consult doctor as advised.",
+                            "summary": content.strip()
                         }
         except Exception as e:
             print(f"Sarvam Chat error: {e}")
