@@ -130,6 +130,6 @@ class Settings:
         return bool(self.sarvam_api_key)
 
 
-@lru_cache
 def get_settings() -> Settings:
+    load_dotenv(override=True)
     return Settings()

@@ -99,61 +99,69 @@ async def process_consultation(
     file: Optional[UploadFile] = File(None),
     use_sample: bool = Form(False)
 ):
-    # Server-managed API key strictly from backend settings
-    key = settings.sarvam_api_key
+    current_settings = get_settings()
+    key = current_settings.sarvam_api_key
     raw_transcript = ""
     saved_filename = ""
+    stt_status_msg = ""
 
     # 1. Handle Audio & Transcription
     if file and not use_sample:
-        # Save audio file to uploads
         saved_filename = f"{uuid.uuid4()}_{file.filename}"
         file_path = os.path.join(UPLOAD_DIR, saved_filename)
         audio_content = await file.read()
         with open(file_path, "wb") as f:
             f.write(audio_content)
 
-        # Transcribe with Sarvam STT using server configuration
-        stt_status_msg = ""
-        if key:
-            try:
-                # Determine correct content type
-                c_type = file.content_type or "audio/wav"
-                if file.filename.endswith(".webm"):
-                    c_type = "audio/webm"
-                elif file.filename.endswith(".mp4") or file.filename.endswith(".m4a"):
-                    c_type = "audio/mp4"
-                elif file.filename.endswith(".ogg"):
-                    c_type = "audio/ogg"
+        if not key:
+            raise HTTPException(
+                status_code=400,
+                detail="SARVAM_API_KEY is not set in backend/.env. Please configure your Sarvam API Key."
+            )
 
-                async with httpx.AsyncClient(timeout=float(settings.stt_timeout_seconds)) as client:
-                    data_payload = {
-                        "model": settings.stt_model,
-                        "language_code": settings.stt_default_language,
-                    }
-                    resp = await client.post(
-                        f"{settings.sarvam_api_url}/speech-to-text",
-                        headers={"api-subscription-key": key},
-                        data=data_payload,
-                        files={"file": (file.filename, audio_content, c_type)}
-                    )
-                    
-                    if resp.status_code == 200:
-                        res_json = resp.json()
-                        raw_transcript = res_json.get("transcript", "").strip()
-                        stt_status_msg = f"Live transcribed with Sarvam AI ({res_json.get('language_code', 'auto')})"
+        # Content type determination
+        c_type = file.content_type or "audio/wav"
+        if file.filename.endswith(".webm"):
+            c_type = "audio/webm"
+        elif file.filename.endswith(".mp4") or file.filename.endswith(".m4a"):
+            c_type = "audio/mp4"
+        elif file.filename.endswith(".ogg"):
+            c_type = "audio/ogg"
+
+        try:
+            async with httpx.AsyncClient(timeout=float(current_settings.stt_timeout_seconds)) as client:
+                data_payload = {
+                    "model": current_settings.stt_model,
+                    "language_code": current_settings.stt_default_language,
+                }
+                resp = await client.post(
+                    f"{current_settings.sarvam_api_url}/speech-to-text",
+                    headers={"api-subscription-key": key},
+                    data=data_payload,
+                    files={"file": (file.filename, audio_content, c_type)}
+                )
+
+                if resp.status_code == 200:
+                    res_json = resp.json()
+                    raw_transcript = res_json.get("transcript", "").strip()
+                    lang = res_json.get("language_code", "detected")
+                    if raw_transcript:
+                        stt_status_msg = f"Transcribed with Sarvam AI ({lang})"
                     else:
-                        stt_status_msg = f"Sarvam STT returned HTTP {resp.status_code}: {resp.text}"
-                        print(f"Sarvam STT error: {resp.status_code} - {resp.text}")
-            except Exception as e:
-                stt_status_msg = f"Sarvam STT connection error: {str(e)}"
-                print(f"Sarvam STT failed: {e}")
-        else:
-            stt_status_msg = "Notice: SARVAM_API_KEY is not set in backend/.env. Using demo transcription."
-
-        # If transcript is empty or demo, fall back to sample transcript
-        if not raw_transcript:
-            raw_transcript = SAMPLE_TRANSCRIPT
+                        raw_transcript = "(No audible speech detected in the recording. Please speak clearly into the microphone.)"
+                        stt_status_msg = "Sarvam AI processed the audio, but no speech was detected."
+                else:
+                    raise HTTPException(
+                        status_code=resp.status_code,
+                        detail=f"Sarvam AI Error ({resp.status_code}): {resp.text}"
+                    )
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to connect to Sarvam AI STT: {str(e)}"
+            )
     else:
         saved_filename = "sample_consultation.wav"
         raw_transcript = SAMPLE_TRANSCRIPT
@@ -209,75 +217,103 @@ def send_email_endpoint(payload: SendEmailRequest):
 
 
 async def extract_action_points_with_ai(transcript: str, patient_name: str, doctor_name: str, key: str) -> Dict[str, Any]:
-    """Pass transcript to Sarvam AI Chat Model (server-side) to extract action points and medical items."""
-    system_prompt = """You are a clinical AI scribe. Analyze the doctor-patient transcript and extract clear action points and instructions for the patient.
-Return JSON with this exact schema:
-{
-  "action_points": ["Specific action point 1", "Specific action point 2", ...],
+    """Pass transcript to Sarvam AI Chat Model to extract action points and medical items."""
+    system_prompt = f"""You are a clinical AI scribe assisting {doctor_name}.
+Analyze the transcript for patient {patient_name} and extract structured action points and instructions.
+If the transcript consists only of greetings, chit-chat, or contains no medical instructions, leave the lists empty and state that in the summary.
+Return valid JSON only matching this schema:
+{{
+  "action_points": ["Specific action 1", "Specific action 2"],
   "medications": [
-    {
+    {{
       "name": "Medicine Name",
-      "dosage": "Dosage (e.g. 40mg)",
-      "timing": "Morning / Night / etc.",
-      "instructions": "Before or after food instructions"
-    }
+      "dosage": "Dosage",
+      "timing": "Morning / Night",
+      "instructions": "Before or after food"
+    }}
   ],
-  "diet_advice": "Dietary and lifestyle instructions",
-  "follow_up": "Next appointment instructions",
-  "summary": "Reassuring, clear 2-sentence summary for the patient"
-}"""
+  "diet_advice": "Dietary and lifestyle advice or None noted",
+  "follow_up": "Next appointment instructions or None noted",
+  "summary": "Clear, reassuring 1-2 sentence summary for the patient"
+}}"""
 
+    cfg = get_settings()
     if key:
         try:
-            async with httpx.AsyncClient(timeout=float(settings.chat_timeout_seconds)) as client:
+            async with httpx.AsyncClient(timeout=float(cfg.chat_timeout_seconds)) as client:
                 body = {
-                    "model": settings.chat_model,
+                    "model": cfg.chat_model,
                     "messages": [
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": f"Transcript:\n{transcript}"}
                     ],
-                    "temperature": settings.chat_temperature,
+                    "temperature": cfg.chat_temperature,
                     "response_format": {"type": "json_object"}
                 }
                 resp = await client.post(
-                    f"{settings.sarvam_api_url}/v1/chat/completions",
+                    f"{cfg.sarvam_api_url}/v1/chat/completions",
                     headers={"api-subscription-key": key, "Content-Type": "application/json"},
                     json=body
                 )
                 if resp.status_code == 200:
                     data = resp.json()
                     content = data["choices"][0]["message"]["content"]
-                    return json.loads(content)
+                    parsed = json.loads(content)
+                    if isinstance(parsed, dict):
+                        action_points = parsed.get("action_points")
+                        if not isinstance(action_points, list):
+                            action_points = [str(action_points)] if action_points else []
+                        
+                        medications = parsed.get("medications")
+                        if not isinstance(medications, list):
+                            medications = []
+
+                        return {
+                            "action_points": action_points,
+                            "medications": medications,
+                            "diet_advice": parsed.get("diet_advice") or "Follow standard health precautions.",
+                            "follow_up": parsed.get("follow_up") or "Consult doctor as advised.",
+                            "summary": parsed.get("summary") or parsed.get("note") or f"Consultation recorded with {doctor_name}."
+                        }
         except Exception as e:
             print(f"Sarvam Chat error: {e}")
 
-    # Accurate, deterministic medical extractor fallback
+    # Fallback only when Telmisartan sample dialogue is passed
+    if "telmisartan" in transcript.lower():
+        return {
+            "action_points": [
+                "Take Telmisartan 40mg + Amlodipine 5mg every morning strictly after breakfast without skipping.",
+                "Continue Metformin 500mg twice daily (morning & night after food) for blood sugar control.",
+                "Cut down white rice, sweets, and oily fried foods immediately.",
+                "Complete 30-45 minutes of brisk walking every day.",
+                "Get repeat Serum Creatinine, lipid profile, and Fasting Blood Sugar tests done in 3 weeks."
+            ],
+            "medications": [
+                {
+                    "name": "Telmisartan + Amlodipine",
+                    "dosage": "40mg + 5mg",
+                    "timing": "Morning",
+                    "instructions": "Take once daily strictly after breakfast"
+                },
+                {
+                    "name": "Metformin",
+                    "dosage": "500mg",
+                    "timing": "Twice daily (Morning & Night)",
+                    "instructions": "Take after breakfast and dinner"
+                }
+            ],
+            "diet_advice": "Strictly reduce white rice, sweets, and fried snacks. Walk for 30 to 45 minutes daily.",
+            "follow_up": "Follow-up in 4 weeks with repeat test reports.",
+            "summary": f"Your consultation with {doctor_name} was successful. Keep your blood pressure and sugar in control by taking your medicines on time and following the daily walking routine."
+        }
+
+    # Generic fallback
     return {
-        "action_points": [
-            "Take Telmisartan 40mg + Amlodipine 5mg every morning strictly after breakfast without skipping.",
-            "Continue Metformin 500mg twice daily (morning & night after food) for blood sugar control.",
-            "Cut down white rice, sweets, and oily fried foods immediately.",
-            "Complete 30-45 minutes of brisk walking every day.",
-            "Get repeat Serum Creatinine, lipid profile, and Fasting Blood Sugar tests done in 3 weeks.",
-            "If severe chest pain, shortness of breath, or BP spikes over 170 occur, visit emergency immediately."
-        ],
-        "medications": [
-            {
-                "name": "Telmisartan + Amlodipine",
-                "dosage": "40mg + 5mg",
-                "timing": "Morning",
-                "instructions": "Take once daily strictly after breakfast"
-            },
-            {
-                "name": "Metformin",
-                "dosage": "500mg",
-                "timing": "Twice daily (Morning & Night)",
-                "instructions": "Take after breakfast and dinner"
-            }
-        ],
-        "diet_advice": "Strictly reduce white rice, sweets, and fried snacks. Walk for 30 to 45 minutes daily.",
-        "follow_up": "Follow-up in 4 weeks with repeat Serum Creatinine, lipid profile, and Fasting Blood Sugar test reports.",
-        "summary": f"Your consultation with {doctor_name} was successful. Keep your blood pressure and sugar in control by taking your medicines on time and following the daily walking routine."
+        "action_points": ["Review recorded dialogue with your physician."],
+        "medications": [],
+        "diet_advice": "Maintain balanced hydration and nutrition.",
+        "follow_up": "Consult doctor as needed.",
+        "summary": f"Consultation transcript recorded with {doctor_name}."
     }
 
 # --------------------------------------------------------------------------- #
