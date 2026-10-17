@@ -66,13 +66,16 @@ npm install
 npm run build               # → frontend/dist, auto-mounted by FastAPI
 
 # 3. Run
-cd .. && ./start.sh
+cd ..
+./start          # Development: runs Frontend (http://localhost:5173) & Backend (http://localhost:8000)
+# or:
+./start prod     # Production: builds UI and runs unified single-port server (http://localhost:8000)
 ```
 
-- **App:** http://localhost:8000
+- **Frontend (Dev):** http://localhost:5173
+- **Backend API:** http://localhost:8000
 - **API docs (Swagger):** http://localhost:8000/docs
-
-`start.sh` builds `frontend/dist` if missing, activates the venv, and launches uvicorn.
+- **Unified App (Prod):** http://localhost:8000
 
 ---
 
